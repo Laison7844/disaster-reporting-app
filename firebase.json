@@ -1,0 +1,38 @@
+{
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ],
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "disaster-reporting-app-hp-2026",
+          "appId": "1:111720121979:android:b67c75339de5e9525984de",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "disaster-reporting-app-hp-2026",
+          "configurations": {
+            "android": "1:111720121979:android:b67c75339de5e9525984de",
+            "ios": "1:111720121979:ios:2b6bc525cc2686ef5984de",
+            "macos": "1:111720121979:ios:2b6bc525cc2686ef5984de",
+            "web": "1:111720121979:web:290c44027911fae55984de",
+            "windows": "1:111720121979:web:23aeb125ec7147d75984de"
+          }
+        }
+      }
+    }
+  }
+}
