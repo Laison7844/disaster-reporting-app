@@ -11,8 +11,7 @@ const USERS_COLLECTION = 'users';
 const REPORTS_COLLECTION = 'reports';
 const NOTIFICATION_LOGS_COLLECTION = 'notification_logs';
 const ADMIN_ALERTS_TOPIC = 'admin_alerts';
-const SOS_CHANNEL_ID = 'sos_alerts_alarm_channel';
-const INCIDENT_CHANNEL_ID = 'incident_alerts_channel';
+const EMERGENCY_CHANNEL_ID = 'emergency_channel';
 const MAX_WHERE_IN_VALUES = 10;
 
 type FirestoreMap = Record<string, unknown>;
@@ -51,9 +50,14 @@ export const sendReportNotifications = onDocumentCreated(
     const reporter = userSnapshot.data() as FirestoreMap;
     const contactMobiles = extractEmergencyContactMobiles(reporter);
     const contactTokens = await getFcmTokensForMobiles(contactMobiles);
-    const payload = buildNotificationPayload(report, reporter, type);
+    const adminTokens = await getAdminFcmTokens();
+    const filteredContactTokens = contactTokens.filter(
+      (token) => !adminTokens.includes(token),
+    );
+    const contactPayload = buildContactPayload(reportId, report, reporter, type);
+    const adminPayload = buildAdminPayload(reportId, report, reporter, type);
 
-    let multicastResponse:
+    let contactResponse:
       | admin.messaging.BatchResponse
       | { successCount: number; failureCount: number; responses: Array<{ success: boolean }> } = {
           successCount: 0,
@@ -61,16 +65,12 @@ export const sendReportNotifications = onDocumentCreated(
           responses: [],
         };
 
-    if (contactTokens.length > 0) {
-      multicastResponse = await messaging.sendEachForMulticast({
-        tokens: contactTokens,
-        notification: {
-          title: payload.title,
-          body: payload.body,
-        },
-        data: payload.data,
-        android: buildAndroidConfig(type),
-        apns: buildApnsConfig(type),
+    if (filteredContactTokens.length > 0) {
+      contactResponse = await messaging.sendEachForMulticast({
+        tokens: filteredContactTokens,
+        data: contactPayload.data,
+        android: buildAndroidConfig(),
+        apns: buildApnsConfig(),
       });
     } else {
       logger.info('No matching contact tokens found for report.', {
@@ -81,23 +81,15 @@ export const sendReportNotifications = onDocumentCreated(
       });
     }
 
-    let adminAlertSent = false;
-    if (type === 'SOS') {
-      await messaging.send({
-        topic: ADMIN_ALERTS_TOPIC,
-        notification: {
-          title: payload.title,
-          body: payload.body,
-        },
-        data: payload.data,
-        android: buildAndroidConfig(type),
-        apns: buildApnsConfig(type),
-      });
-      adminAlertSent = true;
-    }
+    await messaging.send({
+      topic: ADMIN_ALERTS_TOPIC,
+      data: adminPayload.data,
+      android: buildAndroidConfig(),
+      apns: buildApnsConfig(),
+    });
 
-    const failedTokens = contactTokens.filter(
-      (_, index) => !multicastResponse.responses[index]?.success,
+    const failedTokens = filteredContactTokens.filter(
+      (_, index) => !contactResponse.responses[index]?.success,
     );
 
     await firestore.collection(NOTIFICATION_LOGS_COLLECTION).add({
@@ -105,11 +97,11 @@ export const sendReportNotifications = onDocumentCreated(
       userId,
       reportType: type,
       contactMobiles,
-      tokens: contactTokens,
+      tokens: filteredContactTokens,
       failedTokens,
-      successCount: multicastResponse.successCount,
-      failureCount: multicastResponse.failureCount,
-      adminAlertSent,
+      successCount: contactResponse.successCount,
+      failureCount: contactResponse.failureCount,
+      adminAlertSent: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   },
@@ -167,7 +159,25 @@ async function getFcmTokensForMobiles(mobiles: string[]): Promise<string[]> {
   return Array.from(uniqueTokens);
 }
 
-function buildNotificationPayload(
+async function getAdminFcmTokens(): Promise<string[]> {
+  const adminSnapshot = await firestore
+    .collection(USERS_COLLECTION)
+    .where('role', '==', 'admin')
+    .get();
+
+  const tokens = new Set<string>();
+  for (const doc of adminSnapshot.docs) {
+    const token = (doc.get('fcmToken') ?? '').toString().trim();
+    if (token.length > 0) {
+      tokens.add(token);
+    }
+  }
+
+  return Array.from(tokens);
+}
+
+function buildContactPayload(
+  reportId: string,
   report: FirestoreMap,
   reporter: FirestoreMap,
   type: ReportType,
@@ -176,80 +186,121 @@ function buildNotificationPayload(
   body: string;
   data: Record<string, string>;
 } {
-  const reporterName =
-    (report.reporterName ?? reporter.name ?? 'Your contact').toString().trim() ||
-    'Your contact';
-  const description = (report.description ?? report.message ?? '').toString().trim();
+  const reporterName = resolveReporterName(report, reporter);
+  const description = resolveDescription(report, type);
   const severity = (report.severity ?? '').toString().trim();
+  const tag = (report.tag ?? '').toString().trim();
   const lat = stringifyValue(report.latitude);
   const lng = stringifyValue(report.longitude);
   const imageUrl = (report.imageUrl ?? '').toString();
   const audioUrl = (report.audioUrl ?? '').toString();
+  const createdAt = new Date().toISOString();
 
-  if (type === 'SOS') {
-    return {
-      title: '🚨 Emergency SOS Alert',
-      body: `${reporterName} has triggered an SOS alert. Tap to view location.`,
-      data: {
-        type: 'sos',
-        message: `${reporterName} needs immediate help.`,
-        reporterName,
-        lat,
-        lng,
-        description,
-        imageUrl,
-        audioUrl,
-      },
-    };
-  }
+  const title = type === 'SOS' ? '🚨 Emergency SOS Alert' : '🚨 Incident Report Alert';
+  const body =
+    type === 'SOS'
+      ? 'Your contact has triggered an SOS alert. Tap to view location.'
+      : 'Your contact has submitted an incident report. Tap to view details.';
 
   return {
-    title: 'Incident Report Alert',
-    body: `${reporterName} submitted a ${severity.toLowerCase()} incident report.`,
+    title,
+    body,
     data: {
-      type: 'incident',
-      message: description.length === 0 ? 'A new incident has been reported.' : description,
+      alertId: reportId,
+      reportId,
+      type: type === 'SOS' ? 'sos' : 'incident',
+      navigationTarget: 'emergency_alert',
+      title,
+      message: description,
+      description,
       reporterName,
+      severity,
+      tag,
       lat,
       lng,
-      description,
-      severity,
       imageUrl,
       audioUrl,
+      createdAt,
     },
   };
 }
 
-function buildAndroidConfig(type: ReportType): admin.messaging.AndroidConfig {
-  if (type === 'SOS') {
-    return {
-      priority: 'high',
-      notification: {
-        channelId: SOS_CHANNEL_ID,
-        sound: 'emergency_alarm',
-      },
-    };
+function buildAdminPayload(
+  reportId: string,
+  report: FirestoreMap,
+  reporter: FirestoreMap,
+  type: ReportType,
+): {
+  title: string;
+  body: string;
+  data: Record<string, string>;
+} {
+  const reporterName = resolveReporterName(report, reporter);
+  const description = resolveDescription(report, type);
+  const severity = (report.severity ?? '').toString().trim();
+  const tag = (report.tag ?? '').toString().trim();
+  const lat = stringifyValue(report.latitude);
+  const lng = stringifyValue(report.longitude);
+  const imageUrl = (report.imageUrl ?? '').toString();
+  const audioUrl = (report.audioUrl ?? '').toString();
+  const createdAt = new Date().toISOString();
+
+  const title = type === 'SOS' ? '🚨 Emergency SOS Alert' : '🚨 Incident Report Alert';
+  const body =
+    type === 'SOS'
+      ? `${reporterName} triggered an SOS alert. Tap to review the report.`
+      : `${reporterName} submitted an incident report. Tap to review details.`;
+
+  return {
+    title,
+    body,
+    data: {
+      alertId: `admin_${reportId}`,
+      reportId,
+      type: type === 'SOS' ? 'sos' : 'incident',
+      navigationTarget: 'admin_report',
+      title,
+      message: description,
+      description,
+      reporterName,
+      severity,
+      tag,
+      lat,
+      lng,
+      imageUrl,
+      audioUrl,
+      createdAt,
+    },
+  };
+}
+
+function resolveReporterName(report: FirestoreMap, reporter: FirestoreMap): string {
+  return (
+    (report.reporterName ?? reporter.name ?? 'Your contact').toString().trim() ||
+    'Your contact'
+  );
+}
+
+function resolveDescription(report: FirestoreMap, type: ReportType): string {
+  const description = (report.description ?? report.message ?? '').toString().trim();
+  if (description.length > 0) {
+    return description;
   }
 
+  return type === 'SOS'
+    ? 'Your contact has triggered an SOS alert.'
+    : 'A new incident report has been submitted.';
+}
+
+function buildAndroidConfig(): admin.messaging.AndroidConfig {
   return {
     priority: 'high',
-    notification: {
-      channelId: INCIDENT_CHANNEL_ID,
-    },
-  };
-}
-
-function buildApnsConfig(type: ReportType): admin.messaging.ApnsConfig | undefined {
-  if (type !== 'SOS') {
-    return undefined;
-  }
-
-  return {
-    payload: {
-      aps: {
-        sound: 'emergency_alarm.wav',
-      },
-    },
+    ttl: 60 * 60 * 1000,
+    // notification: {
+    //   channelId: EMERGENCY_CHANNEL_ID,
+    //   sound: 'emergency_alarm',
+    //   defaultVibrateTimings: true,
+    // },
   };
 }
 
@@ -263,4 +314,14 @@ function stringifyValue(value: unknown): string {
   }
 
   return '';
+}
+
+function buildApnsConfig(): admin.messaging.ApnsConfig {
+  return {
+    payload: {
+      aps: {
+        sound: 'emergency_alarm.mp3',
+      },
+    },
+  };
 }

@@ -7,13 +7,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../widgets/network_audio_player.dart';
 import '../widgets/severity_badge.dart';
+import 'full_screen_image_screen.dart';
 
 class EmergencyDetailsPage extends StatelessWidget {
   const EmergencyDetailsPage({
     super.key,
     required this.message,
-    required this.lat,
-    required this.lng,
+    this.lat,
+    this.lng,
     this.reporterName = '',
     this.severity = '',
     this.imageUrl = '',
@@ -21,14 +22,20 @@ class EmergencyDetailsPage extends StatelessWidget {
   });
 
   final String message;
-  final double lat;
-  final double lng;
+  final double? lat;
+  final double? lng;
   final String reporterName;
   final String severity;
   final String imageUrl;
   final String audioUrl;
 
+  bool get _hasLocation => lat != null && lng != null;
+
   Future<void> _openMap(BuildContext context) async {
+    if (!_hasLocation) {
+      return;
+    }
+
     final mapUrl = !kIsWeb && Platform.isIOS
         ? 'https://maps.apple.com/?q=$lat,$lng'
         : 'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
@@ -54,7 +61,8 @@ class EmergencyDetailsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final position = LatLng(lat, lng);
+    final heroTag = 'alert_image_${imageUrl.hashCode}';
+    final position = _hasLocation ? LatLng(lat!, lng!) : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -107,60 +115,62 @@ class EmergencyDetailsPage extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Location Coordinates',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      const SizedBox(height: 8),
-                      Text('Latitude: $lat'),
-                      Text('Longitude: $lng'),
-                      const SizedBox(height: 12),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: SizedBox(
-                          height: 180,
-                          child: GoogleMap(
-                            key: ValueKey('details_map_$lat$lng'),
-                            initialCameraPosition: CameraPosition(
-                              target: position,
-                              zoom: 15,
-                            ),
-                            markers: {
-                              Marker(
-                                markerId: const MarkerId('details_location'),
-                                position: position,
+              if (_hasLocation) ...[
+                const SizedBox(height: 16),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Location Coordinates',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 8),
+                        Text('Latitude: $lat'),
+                        Text('Longitude: $lng'),
+                        const SizedBox(height: 12),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: SizedBox(
+                            height: 180,
+                            child: GoogleMap(
+                              key: ValueKey('details_map_${lat}_$lng'),
+                              initialCameraPosition: CameraPosition(
+                                target: position!,
+                                zoom: 15,
                               ),
-                            },
-                            myLocationButtonEnabled: false,
-                            mapToolbarEnabled: false,
-                            zoomControlsEnabled: false,
-                            compassEnabled: false,
-                            tiltGesturesEnabled: false,
-                            rotateGesturesEnabled: false,
-                            scrollGesturesEnabled: false,
-                            zoomGesturesEnabled: false,
-                            liteModeEnabled: true,
+                              markers: {
+                                Marker(
+                                  markerId: const MarkerId('details_location'),
+                                  position: position,
+                                ),
+                              },
+                              myLocationButtonEnabled: false,
+                              mapToolbarEnabled: false,
+                              zoomControlsEnabled: false,
+                              compassEnabled: false,
+                              tiltGesturesEnabled: false,
+                              rotateGesturesEnabled: false,
+                              scrollGesturesEnabled: false,
+                              zoomGesturesEnabled: false,
+                              liteModeEnabled: true,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 14),
-                      ElevatedButton.icon(
-                        onPressed: () => _openMap(context),
-                        icon: const Icon(Icons.map),
-                        label: const Text('Open Map'),
-                      ),
-                    ],
+                        const SizedBox(height: 14),
+                        ElevatedButton.icon(
+                          onPressed: () => _openMap(context),
+                          icon: const Icon(Icons.map),
+                          label: const Text('Open Map'),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
+              ],
               if (imageUrl.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 Card(
@@ -170,22 +180,40 @@ class EmergencyDetailsPage extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Image Preview',
+                          'Image',
                           style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(fontWeight: FontWeight.w700),
                         ),
                         const SizedBox(height: 12),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.network(
-                            imageUrl,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) {
-                              return const Padding(
-                                padding: EdgeInsets.all(16),
-                                child: Text('Unable to load image preview.'),
-                              );
-                            },
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => FullScreenImageScreen(
+                                  imageUrl: imageUrl,
+                                  heroTag: heroTag,
+                                ),
+                              ),
+                            );
+                          },
+                          child: Hero(
+                            tag: heroTag,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.network(
+                                imageUrl,
+                                width: double.infinity,
+                                fit: BoxFit.contain,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return const Padding(
+                                    padding: EdgeInsets.all(16),
+                                    child: Text(
+                                      'Unable to load image preview.',
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
                           ),
                         ),
                       ],

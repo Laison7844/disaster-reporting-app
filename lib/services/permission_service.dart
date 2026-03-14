@@ -27,6 +27,7 @@ class PermissionService {
       Permission.locationWhenInUse,
       Permission.camera,
       Permission.microphone,
+      if (Platform.isAndroid || Platform.isIOS) Permission.notification,
       if (Platform.isAndroid) Permission.storage,
       if (Platform.isAndroid || Platform.isIOS) Permission.photos,
     ];

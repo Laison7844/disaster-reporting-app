@@ -19,6 +19,14 @@ class ReportIncidentScreen extends StatefulWidget {
 }
 
 class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
+  static const List<String> _quickTags = <String>[
+    'Help',
+    'Fire',
+    'Accident',
+    'Flood',
+    'Medical Emergency',
+  ];
+
   final _descriptionController = TextEditingController();
   final _imagePicker = ImagePicker();
   final _audioRecorder = AudioRecorder();
@@ -26,6 +34,9 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
   File? _imageFile;
   String? _audioPath;
   String _selectedSeverity = 'RED';
+  final List<String> _selectedTags = <String>[];
+  String _manualDescription = '';
+  bool _isUpdatingDescription = false;
   bool _isRecording = false;
   bool _isSubmitting = false;
 
@@ -110,9 +121,11 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
     setState(() => _isSubmitting = true);
 
     try {
+      final combinedDescription = _buildSubmissionDescription();
       final result = await ReportService.instance.createIncidentReport(
-        description: _descriptionController.text,
+        description: combinedDescription,
         severity: _selectedSeverity,
+        tag: _selectedTags.isEmpty ? '' : _selectedTags.last,
         imageFile: _imageFile,
         audioFile: _audioPath == null ? null : File(_audioPath!),
       );
@@ -196,6 +209,66 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  void _onQuickTagSelected(String tag, bool selected) {
+    setState(() {
+      if (selected) {
+        if (!_selectedTags.contains(tag)) {
+          _selectedTags.add(tag);
+        }
+      } else {
+        _selectedTags.remove(tag);
+      }
+    });
+
+    _syncDescriptionText();
+  }
+
+  void _onDescriptionChanged(String value) {
+    if (_isUpdatingDescription) {
+      return;
+    }
+
+    _manualDescription = _stripSelectedTags(value, _selectedTags);
+  }
+
+  String _buildSubmissionDescription() {
+    final manual = _manualDescription.trim();
+    if (_selectedTags.isEmpty) {
+      return manual;
+    }
+    final tags = _selectedTags.join(' ').trim();
+    if (manual.isEmpty) {
+      return tags;
+    }
+    return '$manual $tags';
+  }
+
+  void _syncDescriptionText() {
+    final updatedText = _buildSubmissionDescription();
+
+    _isUpdatingDescription = true;
+    _descriptionController.text = updatedText;
+    _descriptionController.selection = TextSelection.fromPosition(
+      TextPosition(offset: _descriptionController.text.length),
+    );
+    _isUpdatingDescription = false;
+  }
+
+  String _stripSelectedTags(String text, List<String> tags) {
+    var result = text;
+    for (final tag in tags) {
+      final trimmed = tag.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      result = result.replaceAll(
+        RegExp('\\b${RegExp.escape(trimmed)}\\b', caseSensitive: false),
+        '',
+      );
+    }
+    return result.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -260,10 +333,30 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
             TextField(
               controller: _descriptionController,
               maxLines: 4,
+              onChanged: _onDescriptionChanged,
               decoration: const InputDecoration(
                 hintText: 'Describe what happened (optional)...',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Quick Tags',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _quickTags.map((tag) {
+                return ChoiceChip(
+                  label: Text(tag),
+                  selected: _selectedTags.contains(tag),
+                  onSelected: (selected) => _onQuickTagSelected(tag, selected),
+                );
+              }).toList(),
             ),
             const SizedBox(height: 20),
             const Text(

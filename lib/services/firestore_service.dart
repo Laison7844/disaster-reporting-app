@@ -68,8 +68,6 @@ class FirestoreService {
       await NotificationService.instance.cancelTokenRefresh();
       if (_isAdminLoggedIn) {
         await NotificationService.instance.subscribeToAdminAlerts();
-      } else {
-        await NotificationService.instance.unsubscribeFromAdminAlerts();
       }
     }
   }
@@ -161,6 +159,7 @@ class FirestoreService {
     await prefs.setBool(_sessionAdminKey, false);
     _isAdminLoggedIn = false;
 
+    await NotificationService.instance.unsubscribeFromAdminAlerts();
     final token = await NotificationService.instance.getFcmToken();
     if (token != null) {
       await _firestore
@@ -172,7 +171,6 @@ class FirestoreService {
           }, SetOptions(merge: true));
     }
 
-    await NotificationService.instance.unsubscribeFromAdminAlerts();
     await NotificationService.instance.watchTokenRefresh(_currentUserId!);
   }
 

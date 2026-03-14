@@ -87,6 +87,7 @@ class ReportService {
   Future<SubmissionResult> createIncidentReport({
     required String description,
     required String severity,
+    String tag = '',
     File? imageFile,
     File? audioFile,
   }) async {
@@ -111,6 +112,7 @@ class ReportService {
     final payload = <String, dynamic>{
       'userId': userId,
       'description': description.trim(),
+      'tag': tag.trim(),
       'severity': severity,
       'latitude': position.latitude,
       'longitude': position.longitude,
@@ -320,6 +322,7 @@ class ReportService {
       userId: userId,
       reporterName: reporterName,
       description: payload['description'] as String? ?? '',
+      tag: payload['tag'] as String? ?? '',
       imageUrl: imageUrl,
       audioUrl: audioUrl,
       latitude: _asDouble(payload['latitude']),

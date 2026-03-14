@@ -6,6 +6,7 @@ class EmergencyReport {
     required this.userId,
     required this.reporterName,
     required this.description,
+    this.tag = '',
     required this.imageUrl,
     required this.audioUrl,
     required this.latitude,
@@ -20,6 +21,7 @@ class EmergencyReport {
   final String userId;
   final String reporterName;
   final String description;
+  final String tag;
   final String imageUrl;
   final String audioUrl;
   final double latitude;
@@ -35,6 +37,7 @@ class EmergencyReport {
       'userId': userId,
       'reporterName': reporterName,
       'description': description,
+      'tag': tag,
       'imageUrl': imageUrl,
       'audioUrl': audioUrl,
       'latitude': latitude,
@@ -57,6 +60,7 @@ class EmergencyReport {
       userId: map['userId'] as String? ?? '',
       reporterName: map['reporterName'] as String? ?? '',
       description: map['description'] as String? ?? '',
+      tag: map['tag'] as String? ?? '',
       imageUrl: map['imageUrl'] as String? ?? '',
       audioUrl: map['audioUrl'] as String? ?? '',
       latitude: (map['latitude'] as num?)?.toDouble() ?? 0,

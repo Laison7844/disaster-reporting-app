@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../services/notification_service.dart';
 import '../services/firestore_service.dart';
 import '../services/report_service.dart';
+import 'emergency_alerts_screen.dart';
 import 'emergency_contacts_edit_screen.dart';
 import 'login_screen.dart';
 import 'my_reports_screen.dart';
@@ -27,6 +31,39 @@ class _HomeScreenState extends State<HomeScreen> {
     ReportService.instance.startAutoSync();
     ReportService.instance.syncPendingQueue();
     _initializeHome();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      NotificationService.instance.flushPendingNavigation();
+    });
+    _checkBatteryOptimization();
+  }
+
+  Future<void> _checkBatteryOptimization() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasShown = prefs.getBool('battery_opt_shown') ?? false;
+    if (hasShown || !mounted) {
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Important: Ensure Delivery'),
+        content: const Text(
+          'To ensure you receive emergency SOS push notifications reliably in the background, please disable battery optimization for this app in your device settings.\n\nThis is especially important for devices from Xiaomi, Oppo, Vivo, and Samsung (Power saving mode).',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    await prefs.setBool('battery_opt_shown', true);
   }
 
   Future<void> _initializeHome() async {
@@ -374,6 +411,18 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: const Icon(Icons.history),
               label: const Text('View My Reports'),
             ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const EmergencyAlertsScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.notifications_active_outlined),
+              label: const Text('Emergency Alerts'),
+            ),
           ],
         ),
       ),
@@ -399,10 +448,7 @@ class _EmergencyServiceRow extends StatelessWidget {
         Icon(icon, color: Theme.of(context).colorScheme.primary),
         const SizedBox(width: 10),
         Expanded(child: Text(label)),
-        Text(
-          number,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
+        Text(number, style: const TextStyle(fontWeight: FontWeight.w700)),
       ],
     );
   }

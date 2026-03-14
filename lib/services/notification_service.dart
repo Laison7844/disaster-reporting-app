@@ -10,21 +10,20 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../firebase/firebase_constants.dart';
+import '../models/received_emergency_alert.dart';
 import '../screens/emergency_details_page.dart';
+import '../screens/report_details_screen.dart';
+import 'emergency_alerts_service.dart';
 
 class NotificationService {
   NotificationService._();
 
   static final NotificationService instance = NotificationService._();
 
-  static const String _sosChannelId = 'sos_alerts_alarm_channel';
-  static const String _sosChannelName = 'SOS Alerts';
-  static const String _sosChannelDescription =
-      'Emergency SOS alerts from trusted contacts.';
-  static const String _incidentChannelId = 'incident_alerts_channel';
-  static const String _incidentChannelName = 'Incident Alerts';
-  static const String _incidentChannelDescription =
-      'Normal incident report notifications.';
+  static const String _emergencyChannelId = 'emergency_channel_v3';
+  static const String _emergencyChannelName = 'Emergency Alerts';
+  static const String _emergencyChannelDescription =
+      'High-priority emergency alerts with alarm sound.';
 
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -34,7 +33,7 @@ class NotificationService {
   StreamSubscription<String>? _tokenRefreshSubscription;
 
   GlobalKey<NavigatorState>? _navigatorKey;
-  _EmergencyNavigationData? _pendingNavigation;
+  _NotificationRouteData? _pendingNavigation;
 
   bool _initialized = false;
   bool _navigationConfigured = false;
@@ -44,6 +43,7 @@ class NotificationService {
       return;
     }
 
+    await _messaging.setAutoInitEnabled(true);
     await Permission.notification.request();
     await _messaging.requestPermission(
       alert: true,
@@ -56,6 +56,11 @@ class NotificationService {
       badge: true,
       sound: true,
     );
+    final token = await _messaging.getToken();
+    if (token != null && token.isNotEmpty) {
+      debugPrint('FCM TOKEN: $token');
+    }
+    await EmergencyAlertsService.instance.initialize();
     await _initializeLocalNotifications();
 
     _initialized = true;
@@ -65,21 +70,24 @@ class NotificationService {
     required GlobalKey<NavigatorState> navigatorKey,
   }) async {
     await initialize();
-
     _navigatorKey = navigatorKey;
 
     if (!_navigationConfigured) {
-      FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
-      FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
+      FirebaseMessaging.onMessage.listen(
+        (message) => unawaited(_handleForegroundMessage(message)),
+      );
+      FirebaseMessaging.onMessageOpenedApp.listen(
+        (message) => unawaited(_handleNotificationTap(message)),
+      );
       _navigationConfigured = true;
     }
 
     final initialMessage = await _messaging.getInitialMessage();
     if (initialMessage != null) {
-      _handleNotificationTap(initialMessage);
+      await _handleNotificationTap(initialMessage, preferPending: true);
     }
 
-    _flushPendingNavigation();
+    flushPendingNavigation();
   }
 
   Future<String?> getFcmToken() async {
@@ -106,6 +114,7 @@ class NotificationService {
         'id': userId,
         'fcmToken': token,
       }, SetOptions(merge: true));
+      await subscribeToAdminAlerts();
     });
   }
 
@@ -114,45 +123,107 @@ class NotificationService {
     _tokenRefreshSubscription = null;
   }
 
-  void _handleForegroundMessage(RemoteMessage remoteMessage) {
+  Future<void> persistIncomingAlert(RemoteMessage remoteMessage) async {
     final navigationData = _extractNavigationData(remoteMessage);
     if (navigationData == null) {
       return;
     }
 
+    await _persistAlertIfNeeded(navigationData);
+  }
+
+  Future<void> handleBackgroundMessage(RemoteMessage remoteMessage) async {
+    await persistIncomingAlert(remoteMessage);
+    await _showAndroidBackgroundNotification(remoteMessage);
+  }
+
+  void flushPendingNavigation() {
+    final pending = _pendingNavigation;
+    if (pending == null) {
+      return;
+    }
+
+    final navigatorState = _navigatorKey?.currentState;
+    if (navigatorState == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        flushPendingNavigation();
+      });
+      return;
+    }
+
+    _pendingNavigation = null;
+    _pushDestination(pending);
+  }
+
+  Future<void> _handleForegroundMessage(RemoteMessage remoteMessage) async {
+    final navigationData = _extractNavigationData(remoteMessage);
+    if (navigationData == null) {
+      return;
+    }
+
+    await _persistAlertIfNeeded(navigationData);
+
     if (!kIsWeb && Platform.isAndroid) {
-      unawaited(
-        _showAndroidForegroundNotification(
-          remoteMessage: remoteMessage,
-          navigationData: navigationData,
-        ),
+      await _showAndroidForegroundNotification(
+        remoteMessage: remoteMessage,
+        navigationData: navigationData,
       );
       return;
     }
 
-    _pushEmergencyPage(navigationData);
+    _pushDestination(navigationData);
   }
 
-  void _handleNotificationTap(RemoteMessage remoteMessage) {
+  Future<void> _handleNotificationTap(
+    RemoteMessage remoteMessage, {
+    bool preferPending = false,
+  }) async {
     final navigationData = _extractNavigationData(remoteMessage);
     if (navigationData == null) {
       return;
     }
 
-    _pushEmergencyPage(navigationData);
+    await _persistAlertIfNeeded(navigationData);
+    _queueOrPush(navigationData, preferPending: preferPending);
   }
 
-  void _pushEmergencyPage(_EmergencyNavigationData navigationData) {
+  void _queueOrPush(
+    _NotificationRouteData navigationData, {
+    bool preferPending = false,
+  }) {
+    final navigatorState = _navigatorKey?.currentState;
+    if (preferPending || navigatorState == null) {
+      _pendingNavigation = navigationData;
+      return;
+    }
+
+    _pushDestination(navigationData);
+  }
+
+  void _pushDestination(_NotificationRouteData navigationData) {
     final navigatorState = _navigatorKey?.currentState;
     if (navigatorState == null) {
       _pendingNavigation = navigationData;
       return;
     }
 
+    if (navigationData.navigationTarget == 'admin_report' &&
+        navigationData.reportId.isNotEmpty) {
+      navigatorState.push(
+        MaterialPageRoute(
+          builder: (_) => ReportDetailsScreen.fromReportId(
+            reportId: navigationData.reportId,
+            title: 'Admin Report Details',
+          ),
+        ),
+      );
+      return;
+    }
+
     navigatorState.push(
       MaterialPageRoute(
         builder: (_) => EmergencyDetailsPage(
-          message: navigationData.message,
+          message: navigationData.description,
           reporterName: navigationData.reporterName,
           severity: navigationData.severity,
           lat: navigationData.lat,
@@ -164,27 +235,7 @@ class NotificationService {
     );
   }
 
-  void _flushPendingNavigation() {
-    final pending = _pendingNavigation;
-    if (pending == null) {
-      return;
-    }
-
-    final navigatorState = _navigatorKey?.currentState;
-    if (navigatorState == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _flushPendingNavigation();
-      });
-      return;
-    }
-
-    _pendingNavigation = null;
-    _pushEmergencyPage(pending);
-  }
-
-  _EmergencyNavigationData? _extractNavigationData(
-    RemoteMessage remoteMessage,
-  ) {
+  _NotificationRouteData? _extractNavigationData(RemoteMessage remoteMessage) {
     final data = remoteMessage.data;
     if (data.isEmpty) {
       return null;
@@ -198,29 +249,88 @@ class NotificationService {
       return null;
     }
 
-    final message =
-        (data['message'] ??
+    final title =
+        (data['title'] ??
+                remoteMessage.notification?.title ??
+                'Emergency Alert')
+            .toString();
+    final description =
+        (data['description'] ??
+                data['message'] ??
                 remoteMessage.notification?.body ??
                 'Emergency reported')
             .toString();
-    final latValue = data['lat'] ?? data['latitude'];
-    final lngValue = data['lng'] ?? data['longitude'];
-    final lat = double.tryParse((latValue ?? '').toString());
-    final lng = double.tryParse((lngValue ?? '').toString());
 
-    if (lat == null || lng == null) {
-      return null;
-    }
-
-    return _EmergencyNavigationData(
+    return _NotificationRouteData(
+      id: _resolveAlertId(data),
+      reportId: (data['reportId'] ?? '').toString(),
       type: type.isEmpty ? 'sos' : type,
-      message: message,
-      lat: lat,
-      lng: lng,
+      title: title,
+      description: description,
       reporterName: (data['reporterName'] ?? '').toString(),
       severity: (data['severity'] ?? '').toString(),
       imageUrl: (data['imageUrl'] ?? '').toString(),
       audioUrl: (data['audioUrl'] ?? '').toString(),
+      lat: _parseDoubleOrNull(data['lat'] ?? data['latitude']),
+      lng: _parseDoubleOrNull(data['lng'] ?? data['longitude']),
+      navigationTarget: (data['navigationTarget'] ?? 'emergency_alert')
+          .toString(),
+      createdAt:
+          DateTime.tryParse((data['createdAt'] ?? '').toString()) ??
+          DateTime.now(),
+    );
+  }
+
+  String _resolveAlertId(Map<String, dynamic> data) {
+    final explicitId = (data['alertId'] ?? '').toString().trim();
+    if (explicitId.isNotEmpty) {
+      return explicitId;
+    }
+
+    final reportId = (data['reportId'] ?? '').toString().trim();
+    if (reportId.isNotEmpty) {
+      return reportId;
+    }
+
+    final type = (data['type'] ?? '').toString().trim();
+    final message = (data['message'] ?? data['description'] ?? '')
+        .toString()
+        .trim();
+    final createdAt = (data['createdAt'] ?? '').toString().trim();
+    return '${type}_${message.hashCode}_$createdAt';
+  }
+
+  double? _parseDoubleOrNull(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse((value ?? '').toString());
+  }
+
+  Future<void> _persistAlertIfNeeded(
+    _NotificationRouteData navigationData,
+  ) async {
+    if (navigationData.navigationTarget == 'admin_report') {
+      return;
+    }
+
+    await EmergencyAlertsService.instance.saveAlert(
+      ReceivedEmergencyAlert(
+        id: navigationData.id,
+        reportId: navigationData.reportId,
+        type: navigationData.type,
+        title: navigationData.title,
+        description: navigationData.description,
+        reporterName: navigationData.reporterName,
+        severity: navigationData.severity,
+        imageUrl: navigationData.imageUrl,
+        audioUrl: navigationData.audioUrl,
+        latitude: navigationData.lat,
+        longitude: navigationData.lng,
+        navigationTarget: navigationData.navigationTarget,
+        createdAt: navigationData.createdAt,
+      ),
     );
   }
 
@@ -243,68 +353,106 @@ class NotificationService {
           _handleBackgroundLocalNotificationResponse,
     );
 
-    final androidPlugin = _localNotifications
+    await _createAndroidChannel(_localNotifications);
+  }
+
+  Future<void> _showAndroidForegroundNotification({
+    required RemoteMessage remoteMessage,
+    required _NotificationRouteData navigationData,
+  }) async {
+    final notification = remoteMessage.notification;
+
+    await _createAndroidChannel(_localNotifications);
+    await _localNotifications.show(
+      navigationData.id.hashCode,
+      notification?.title ?? navigationData.title,
+      notification?.body ?? navigationData.description,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _emergencyChannelId,
+          _emergencyChannelName,
+          channelDescription: _emergencyChannelDescription,
+          importance: Importance.max,
+          priority: Priority.high,
+          category: AndroidNotificationCategory.alarm,
+          playSound: true,
+          sound: const RawResourceAndroidNotificationSound('emergency_alarm'),
+          audioAttributesUsage: AudioAttributesUsage.alarm,
+        ),
+      ),
+      payload: jsonEncode(navigationData.toMap()),
+    );
+  }
+
+  Future<void> _showAndroidBackgroundNotification(
+    RemoteMessage remoteMessage,
+  ) async {
+    if (kIsWeb || !Platform.isAndroid) {
+      return;
+    }
+
+    if (remoteMessage.notification != null) {
+      return;
+    }
+
+    final navigationData = _extractNavigationData(remoteMessage);
+    if (navigationData == null) {
+      return;
+    }
+
+    final plugin = FlutterLocalNotificationsPlugin();
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
+    const initializationSettings = InitializationSettings(
+      android: androidSettings,
+    );
+
+    await plugin.initialize(
+      initializationSettings,
+      onDidReceiveNotificationResponse: _handleLocalNotificationResponse,
+      onDidReceiveBackgroundNotificationResponse:
+          _handleBackgroundLocalNotificationResponse,
+    );
+
+    await _createAndroidChannel(plugin);
+
+    await plugin.show(
+      navigationData.id.hashCode,
+      navigationData.title,
+      navigationData.description,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _emergencyChannelId,
+          _emergencyChannelName,
+          channelDescription: _emergencyChannelDescription,
+          importance: Importance.max,
+          priority: Priority.high,
+          category: AndroidNotificationCategory.alarm,
+          playSound: true,
+          sound: const RawResourceAndroidNotificationSound('emergency_alarm'),
+          audioAttributesUsage: AudioAttributesUsage.alarm,
+        ),
+      ),
+      payload: jsonEncode(navigationData.toMap()),
+    );
+  }
+
+  Future<void> _createAndroidChannel(
+    FlutterLocalNotificationsPlugin plugin,
+  ) async {
+    final androidPlugin = plugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
     await androidPlugin?.createNotificationChannel(
       const AndroidNotificationChannel(
-        _sosChannelId,
-        _sosChannelName,
-        description: _sosChannelDescription,
+        _emergencyChannelId,
+        _emergencyChannelName,
+        description: _emergencyChannelDescription,
         importance: Importance.max,
         sound: RawResourceAndroidNotificationSound('emergency_alarm'),
       ),
-    );
-    await androidPlugin?.createNotificationChannel(
-      const AndroidNotificationChannel(
-        _incidentChannelId,
-        _incidentChannelName,
-        description: _incidentChannelDescription,
-        importance: Importance.max,
-      ),
-    );
-  }
-
-  Future<void> _showAndroidForegroundNotification({
-    required RemoteMessage remoteMessage,
-    required _EmergencyNavigationData navigationData,
-  }) async {
-    final notification = remoteMessage.notification;
-    final isSos = navigationData.type == 'sos';
-    final fallbackTitle = isSos
-        ? '🚨 Emergency SOS Alert'
-        : 'Incident Report Alert';
-
-    await _localNotifications.show(
-      navigationData.hashCode,
-      notification?.title ?? fallbackTitle,
-      navigationData.message,
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          isSos ? _sosChannelId : _incidentChannelId,
-          isSos ? _sosChannelName : _incidentChannelName,
-          channelDescription: isSos
-              ? _sosChannelDescription
-              : _incidentChannelDescription,
-          importance: Importance.max,
-          priority: Priority.high,
-          playSound: true,
-          sound: isSos
-              ? const RawResourceAndroidNotificationSound('emergency_alarm')
-              : null,
-        ),
-      ),
-      payload: jsonEncode(<String, dynamic>{
-        'type': navigationData.type,
-        'message': navigationData.message,
-        'lat': navigationData.lat,
-        'lng': navigationData.lng,
-        'reporterName': navigationData.reporterName,
-        'severity': navigationData.severity,
-        'imageUrl': navigationData.imageUrl,
-        'audioUrl': navigationData.audioUrl,
-      }),
     );
   }
 
@@ -319,31 +467,34 @@ class NotificationService {
       return;
     }
 
-    _pushEmergencyPage(navigationData);
+    unawaited(_persistAlertIfNeeded(navigationData));
+    _pushDestination(navigationData);
   }
 
-  _EmergencyNavigationData? _extractNavigationDataFromPayload(String payload) {
+  _NotificationRouteData? _extractNavigationDataFromPayload(String payload) {
     final decodedPayload = jsonDecode(payload);
     if (decodedPayload is! Map) {
       return null;
     }
 
-    final message = (decodedPayload['message'] ?? '').toString();
-    final lat = double.tryParse((decodedPayload['lat'] ?? '').toString());
-    final lng = double.tryParse((decodedPayload['lng'] ?? '').toString());
-    if (message.isEmpty || lat == null || lng == null) {
-      return null;
-    }
-
-    return _EmergencyNavigationData(
-      type: (decodedPayload['type'] ?? '').toString(),
-      message: message,
-      lat: lat,
-      lng: lng,
-      reporterName: (decodedPayload['reporterName'] ?? '').toString(),
-      severity: (decodedPayload['severity'] ?? '').toString(),
-      imageUrl: (decodedPayload['imageUrl'] ?? '').toString(),
-      audioUrl: (decodedPayload['audioUrl'] ?? '').toString(),
+    final data = Map<String, dynamic>.from(decodedPayload);
+    return _NotificationRouteData(
+      id: (data['id'] ?? '').toString(),
+      reportId: (data['reportId'] ?? '').toString(),
+      type: (data['type'] ?? '').toString(),
+      title: (data['title'] ?? '').toString(),
+      description: (data['description'] ?? '').toString(),
+      reporterName: (data['reporterName'] ?? '').toString(),
+      severity: (data['severity'] ?? '').toString(),
+      imageUrl: (data['imageUrl'] ?? '').toString(),
+      audioUrl: (data['audioUrl'] ?? '').toString(),
+      lat: _parseDoubleOrNull(data['lat']),
+      lng: _parseDoubleOrNull(data['lng']),
+      navigationTarget: (data['navigationTarget'] ?? 'emergency_alert')
+          .toString(),
+      createdAt:
+          DateTime.tryParse((data['createdAt'] ?? '').toString()) ??
+          DateTime.now(),
     );
   }
 }
@@ -353,24 +504,52 @@ void _handleBackgroundLocalNotificationResponse(NotificationResponse response) {
   NotificationService.instance._handleLocalNotificationResponse(response);
 }
 
-class _EmergencyNavigationData {
-  const _EmergencyNavigationData({
+class _NotificationRouteData {
+  const _NotificationRouteData({
+    required this.id,
+    required this.reportId,
     required this.type,
-    required this.message,
-    required this.lat,
-    required this.lng,
-    this.reporterName = '',
-    this.severity = '',
-    this.imageUrl = '',
-    this.audioUrl = '',
+    required this.title,
+    required this.description,
+    required this.reporterName,
+    required this.severity,
+    required this.imageUrl,
+    required this.audioUrl,
+    required this.navigationTarget,
+    required this.createdAt,
+    this.lat,
+    this.lng,
   });
 
+  final String id;
+  final String reportId;
   final String type;
-  final String message;
-  final double lat;
-  final double lng;
+  final String title;
+  final String description;
   final String reporterName;
   final String severity;
   final String imageUrl;
   final String audioUrl;
+  final double? lat;
+  final double? lng;
+  final String navigationTarget;
+  final DateTime createdAt;
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'reportId': reportId,
+      'type': type,
+      'title': title,
+      'description': description,
+      'reporterName': reporterName,
+      'severity': severity,
+      'imageUrl': imageUrl,
+      'audioUrl': audioUrl,
+      'lat': lat,
+      'lng': lng,
+      'navigationTarget': navigationTarget,
+      'createdAt': createdAt.toIso8601String(),
+    };
+  }
 }
